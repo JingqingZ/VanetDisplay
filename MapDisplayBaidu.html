@@ -1,0 +1,415 @@
+<!doctype html>
+<html class="no-js">
+  <head>
+    <meta charset="utf-8">
+    <title>Baidu Maps Display</title>
+    <meta name="description" content="">
+    <meta name="viewport" content="initial-scale=1.0, user-scalable=no">
+    <script src="/VanetDisplay/static/js/pubnub-3.7.1.min.js"></script>
+    <script src="/VanetDisplay/static/js/jquery-2.2.3.min.js"></script>
+    <link rel="stylesheet" href="/VanetDisplay/static/css/bootstrap.css">
+    <script type="text/javascript" src="http://api.map.baidu.com/api?v=2.0&ak=Ixk2mvVt6W76q9Y9tGpdHnGC"></script>
+
+    <style>
+      html, body, #map-canvas {
+        height: 700px;
+        margin: 0px;
+        padding: 0px
+      }
+
+    </style>
+
+  </head>
+  <body>
+    <!--<div class="container"><h1>Baidu Maps Display</h1></div>-->
+    <div id="map-canvas"></div>
+    
+    <!-- Map Configuration and data -->
+    <script>
+    $('#map-canvas').height($(window).height());
+
+    // init map
+    var map = new BMap.Map("map-canvas");
+    // init markers and related info
+    var map_marker_array;
+
+    // get current location and set center
+    var geolocation = new BMap.Geolocation();
+    geolocation.getCurrentPosition(function(position){ 
+      if(this.getStatus() == BMAP_STATUS_SUCCESS){  
+        // calls PubNub
+        pubnub_init();
+        pubnub_subscribe();
+        // initialize baidu map
+        baidumap_initialize(position.latitude, position.longitude)
+      } else {
+        console.log('Error: ' + this.getStatus());
+      }        
+    },
+    {
+        enableHighAccuracy: true
+    });
+
+    var pubnub;
+    function pubnub_init() {
+      pubnub = PUBNUB.init({
+        publish_key: 'pub-c-1d16134f-8953-44a5-8f83-ef5eb5db44d3',
+        subscribe_key: 'sub-c-ce12a524-ea79-11e5-bf9d-02ee2ddab7fe'
+      })
+    }
+
+    function pubnub_subscribe() {
+      //get coords info
+      pubnub.subscribe({
+        channel: "map-coords",
+        message: function(message, channel) {
+          console.log("Message is received from channel \"map-coords\": " + JSON.stringify(message));
+          var carId = message["carId"];
+          var lat = message["coords"]['lat'];
+          var lng = message["coords"]['lng'];
+          //gps correction
+          var correction = gps_correction(carId, lat, lng);
+          var valid = correction[0][0];
+          var invalid_reason = correction[0][1];
+          var corr_lat = correction[1];
+          var corr_lng = correction[2];
+          var distance = correction[3];
+          console.log("GPS Correction for car " + carId + 
+                      ": origin: [" + lat + ", " + lng + "], " +
+                      "corrected: [" + corr_lat + ", " + corr_lng + "], " +
+                      "valid: " + valid + ", " + 
+                      "distance: " + distance + " km");
+          //update map canvas
+          if (valid) {
+            redraw(carId, corr_lat, corr_lng);
+          } else {
+            console.log(invalid_reason + " of car " + carId);
+          }
+          //TODO: this a tmp function
+          update_connection();
+        },
+        connect: function() {console.log("PubNub map-coords Connected")}
+      })
+
+      //get ndn-info info
+      pubnub.subscribe({
+        channel: "ndn-info",
+        message: function(message, channel) {
+          console.log("Message is received from channel \"ndn-info\": " + JSON.stringify(message));
+          // TODO: message handler, this is a demo for latlng handler
+          var carId = message["carId"];
+          var lat = message["ndn-info"]["lat"];
+          var lng = message["ndn-info"]["lng"];
+          //gps correction
+          var correction = gps_correction(carId, lat, lng);
+          var valid = correction[0][0];
+          var invalid_reason = correction[0][1];
+          var corr_lat = correction[1];
+          var corr_lng = correction[2];
+          var distance = correction[3];
+          console.log("GPS Correction for car " + carId + 
+                      ": origin: [" + lat + ", " + lng + "], " +
+                      "corrected: [" + corr_lat + ", " + corr_lng + "], " +
+                      "valid: " + valid + ", " + 
+                      "distance: " + distance + " km");
+          //update map canvas
+          if (valid) {
+            redraw(carId, corr_lat, corr_lng);
+            //redraw(carId, lat, lng);
+          } else {
+            console.log(invalid_reason + " of car " + carId);
+          }
+        },
+        connect: function() {console.log("PubNub ndn-info Connected")}
+      })
+
+    }
+
+    // TODO: message handler
+    function pubnub_publish(message) {
+      console.log("Message to Send to Pubnub channel \"control-info\": " + JSON.stringify(message));
+      message = JSON.stringify(message);
+      pubnub.publish({
+        channel: "control-info",
+        message: message,
+        callback: function(){}
+      });
+    }
+
+    // road
+    var road = [[40.006830, 40.008279],  // lat range
+                [116.337309,116.339828]]; // lng range
+    // only gps in within this range is valid
+    var outline = [[40.006491,40.008688], 
+                   [116.336693,116.34052]]; 
+    // only gps outof this range is valid
+    var inline = [[40.00723,40.008031], 
+                   [116.337569,116.33959]]; 
+    // speed range m/s
+    var speed_range = [0, 7];
+
+    function gps_correction(carId, latIn, lngIn) {
+      var corr_lat, corr_lng;
+      var valid = gps_check_validation(carId, latIn, lngIn);
+
+      //lat correction
+      if (latIn > road[0][0] && latIn < road[0][1]) { corr_lat = latIn; } 
+      else if (latIn >= road[0][1]) { corr_lat = road[0][1]; } 
+      else { corr_lat = road[0][0]; }
+
+      //lng correction
+      if (lngIn > road[1][0] && lngIn < road[1][1]) { corr_lng = lngIn; } 
+      else if (lngIn >= road[1][1]) { corr_lng = road[1][1]; } 
+      else { corr_lng = road[1][0]; }
+
+      // inside road range
+      if (corr_lat == latIn && corr_lng == lngIn) {
+        latdiff = Math.min(latIn - road[0][0], road[0][1] - latIn);
+        lngdiff = Math.min(lngIn - road[1][0], road[1][1] - lngIn);
+        if (latdiff <= lngdiff) {
+          if (latIn - road[0][0] <= road[0][1] - latIn){
+            corr_lat = road[0][0]
+          } else {
+            corr_lat = road[0][1]
+          }
+        } else {
+          if (lngIn - road[1][0] <= road[1][1] - lngIn){
+            corr_lng = road[1][0]
+          } else {
+            corr_lng = road[1][1]
+          }
+        }
+      }
+
+      var distance = getDistanceFromLatLonInKm(latIn, lngIn, corr_lat, corr_lng)
+
+      return [valid, corr_lat, corr_lng, distance];
+    }
+
+    function gps_check_validation(carId, latIn, lngIn) {
+      //return true;
+
+      // check whether the GPS point is in the valid range
+      if (!(latIn > outline[0][0] && latIn < outline[0][1]
+        && lngIn > outline[1][0] && lngIn < outline[1][1])) {
+        return [false, "Invalid GPS! Out of outline"];
+      }
+
+      if (latIn > inline[0][0] && latIn < inline[0][1]
+        && lngIn > inline[1][0] && lngIn < inline[1][1]) {
+        return [false, "Invalid GPS! Inside inline"];
+      }
+
+      if (!map_marker_array["lastpoint"][carId] || !map_marker_array["timestamp"][carId]) {
+        return [true, ""]; // first valid gps point
+      }
+
+      // check whether the speed of car is in valid speed range
+      // the car shouldn't move too fast or too slow
+      var last_lat = map_marker_array["lastpoint"][carId].lat
+      var last_lng = map_marker_array["lastpoint"][carId].lng
+      var last_timestamp = map_marker_array["timestamp"][carId];
+      var timestamp = Date.now();
+
+      var distance = getDistanceFromLatLonInKm(latIn, lngIn, last_lat, last_lng) * 1000.0; // meters
+      var time = (timestamp - last_timestamp) / 1000.0; // seconds
+      var speed = distance / time;
+
+      if (!(speed > speed_range[0] && speed < speed_range[1])) {
+        return [false, "Invalid Speed! Speed:" + speed + "m/s"];
+      }
+
+      return [true, ""];
+    }
+
+    function baidumap_initialize(latIn, lngIn) {
+      var point = new BMap.Point(lngIn, latIn); 
+      map.centerAndZoom(point, 17);
+      
+      var navigationControl = new BMap.NavigationControl({
+        anchor: BMAP_ANCHOR_TOP_LEFT,
+        type: BMAP_NAVIGATION_CONTROL_LARGE,
+      });
+      map.addControl(navigationControl);
+          
+
+      map_marker_array = new Array();
+      map_marker_array["marker"] = new Array(); // baidu marker
+      map_marker_array["track"] = new Array(); // track of each car
+      map_marker_array["timestamp"] = new Array(); // timestamp of latest communication of each car
+      map_marker_array["connection"] = new Array(); // connection info among cars
+      map_marker_array["lastpoint"] = new Array(); // last gps position of each car
+      setInterval(checkTimeout, 5*1000);
+
+      // TODO: develop control panel and send control-info to cars through function pubnub_publish(message)
+      // this a tmp control panel for simple test
+      function TmpControl(){
+        this.defaultAnchor = BMAP_ANCHOR_TOP_RIGHT;
+        this.defaultOffset = new BMap.Size(30, 30);
+      }
+
+      // 通过JavaScript的prototype属性继承于BMap.Control
+      TmpControl.prototype = new BMap.Control();
+
+      // 自定义控件必须实现自己的initialize方法,并且将控件的DOM元素返回
+      // 在本方法中创建个div元素作为控件的容器,并将其添加到地图容器中
+      TmpControl.prototype.initialize = function(map){
+        // 创建一个DOM元素
+        var div = document.createElement("div");
+        // 添加文字说明
+        div.appendChild(document.createTextNode("群发信息"));
+        // 设置样式
+        div.style.cursor = "pointer";
+        div.style.border = "1px solid gray";
+        div.style.backgroundColor = "white";
+        // 绑定事件,点击一次放大两级
+        div.onclick = function(e){
+          // message format
+          pubnub_publish({"message": "Hello from monitor", "to-whom": [1,2,3]});
+        }
+        // 添加DOM元素到地图中
+        map.getContainer().appendChild(div);
+        // 将DOM元素返回
+        return div;
+      }
+      // 创建控件
+      var my = new TmpControl();
+      // 添加到地图当中
+      map.addControl(my);
+
+      console.log("Baidu Maps Initialized") 
+    }
+
+    function baidumap_icon(online) {
+      var myIcon;
+      if (!online) {
+        var anchor = 10;
+        myIcon = new BMap.Icon("http://api.map.baidu.com/img/markers.png", new BMap.Size(23, 25), {  
+          anchor: new BMap.Size(10, 25),  
+          imageOffset: new BMap.Size(0, - anchor * 25) 
+        });
+      } else {
+        myIcon = new BMap.Icon("/VanetDisplay/static/images/car.png", new BMap.Size(945, 945), {  
+          anchor: new BMap.Size(15, 15),
+          imageSize: new BMap.Size(30, 30), 
+        });
+      }
+      
+      return myIcon;  
+    }
+
+    // calculate distance form lat-lng coords
+    function getDistanceFromLatLonInKm(lat1, lng1, lat2, lng2) {
+      var R = 6371; // Radius of the earth in km
+      var dLat = deg2rad(lat2-lat1);  // deg2rad below
+      var dLon = deg2rad(lng2-lng1); 
+      var a = 
+        Math.sin(dLat/2) * Math.sin(dLat/2) +
+        Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) * 
+        Math.sin(dLon/2) * Math.sin(dLon/2); 
+      var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
+      var d = R * c; // Distance in km
+      return d;
+    }
+
+    function deg2rad(deg) {
+      return deg * (Math.PI/180)
+    }
+
+    // TODO: this is a tmp function for test
+    // if the distance between two cars is smaller than the threshold,
+    // then we assume there is a ndn data transmission between them
+    function update_connection() {
+      var threshold = 0.2; // kilometers
+      for (var cari in map_marker_array["marker"]) {
+        for (var carj in map_marker_array["marker"]) {
+          if (cari != carj) {
+            var distance = getDistanceFromLatLonInKm(
+                map_marker_array["marker"][cari].getPosition().lat, map_marker_array["marker"][cari].getPosition().lng, 
+                map_marker_array["marker"][carj].getPosition().lat, map_marker_array["marker"][carj].getPosition().lng);
+            //console.log(distance);
+            
+            if (distance < threshold) {
+              map_marker_array["connection"][cari][carj].setPath([map_marker_array["marker"][cari].getPosition(), map_marker_array["marker"][carj].getPosition()]);
+              map_marker_array["connection"][carj][cari].setPath([map_marker_array["marker"][carj].getPosition(), map_marker_array["marker"][cari].getPosition()]);
+              map.addOverlay(map_marker_array["connection"][cari][carj]);
+              map.addOverlay(map_marker_array["connection"][carj][cari]);
+            } else {
+              map.removeOverlay(map_marker_array["connection"][cari][carj]);
+              map.removeOverlay(map_marker_array["connection"][carj][cari]);
+            }
+            
+          }
+        }
+      }
+    }
+
+    // moves the marker and center of map
+    function redraw(carId, latIn, lngIn) {
+      if (map_marker_array["marker"][carId]) {
+        map_marker_array["marker"][carId].setPosition(new BMap.Point(lngIn, latIn));
+      } else {
+        var new_BMapPoint = new BMap.Point(lngIn, latIn);
+        map_marker_array["connection"][carId] = new Array();
+        for (var car in map_marker_array["marker"]) {
+          map_marker_array["connection"][car][carId] = new BMap.Polyline(
+            [map_marker_array["marker"][car].getPosition(), new_BMapPoint], {
+              strokeStyle: "solid",
+              strokeColor: '#FF3030',
+              strokeOpacity: 1.0,
+              strokeWeight: 5,
+            });
+          map_marker_array["connection"][carId][car] = new BMap.Polyline(
+            [new_BMapPoint, map_marker_array["marker"][car].getPosition()], {
+              strokeStyle: "solid",
+              strokeColor: '#FF3030',
+              strokeOpacity: 1.0,
+              strokeWeight: 5,
+            });
+        }
+
+        map_marker_array["marker"][carId] = new BMap.Marker(new_BMapPoint);
+        map_marker_array["track"][carId] = [];
+        map.addOverlay(map_marker_array["marker"][carId]);
+      }
+      map_marker_array["timestamp"][carId] = Date.now();
+      pushCoordToArray(carId, latIn, lngIn);
+      map_marker_array["marker"][carId].setTitle(carId.toString());
+      // disable/comment "label {}" in bootstrap.css
+      // as there are conflicts between baidu label and bootstrap label
+      map_marker_array["marker"][carId].setLabel(new BMap.Label(carId.toString(), {offset: BMap.Size(50, 50)}));
+      map_marker_array["marker"][carId].setIcon(baidumap_icon(true));
+    }
+
+
+    function pushCoordToArray(carId, latIn, lngIn) {
+      var new_BMapPoint = new BMap.Point(lngIn, latIn);
+      map_marker_array["track"][carId].push(new_BMapPoint);
+      if (map_marker_array["lastpoint"][carId]) {
+        var line = new BMap.Polyline(
+          [map_marker_array["lastpoint"][carId], new_BMapPoint], {
+          strokeStyle: "solid",
+          strokeColor: '#00BFFF',
+          strokeOpacity: 0.5,
+          strokeWeight: 5,
+        });
+        map.addOverlay(line);
+      }
+      map_marker_array["lastpoint"][carId] = new_BMapPoint;
+    }
+
+    function checkTimeout() {
+      var timeout = 10*1000;
+      var currentTimeStamp = Date.now();
+      for (var carId in map_marker_array["timestamp"]) {
+        if (currentTimeStamp - map_marker_array["timestamp"][carId] > timeout) {
+          console.log("Connection Lost with carId:" + carId);
+          map_marker_array["marker"][carId].setTitle(carId.toString() + " connection lost");
+          map_marker_array["marker"][carId].setIcon(baidumap_icon(false));
+        }
+      }
+    }
+
+    </script>
+  </body>
+</html>
