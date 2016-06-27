@@ -59,7 +59,7 @@
     }
 
     function pubnub_subscribe() {
-      //get coords info
+      //get coords info from browser on mobile end
       pubnub.subscribe({
         channel: "map-coords",
         message: function(message, channel) {
@@ -91,12 +91,13 @@
         connect: function() {console.log("PubNub map-coords Connected")}
       })
 
-      //get ndn-info info
+      //get ndn-info info from ndn stack on mobile end
+      //coords info may be included in ndn-info
       pubnub.subscribe({
         channel: "ndn-info",
         message: function(message, channel) {
           console.log("Message is received from channel \"ndn-info\": " + JSON.stringify(message));
-          // TODO: message handler, this is a demo for latlng handler
+          // TODO: message handler, this is a demo for lat,lng handler
           var carId = message["carId"];
           var lat = message["ndn-info"]["lat"];
           var lng = message["ndn-info"]["lng"];
